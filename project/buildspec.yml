@@ -1,7 +1,37 @@
 version: 0.2
 
 phases:
+  pre_build:
+    commands:
+      - echo "Validating CloudFormation template..."
+      - aws cloudformation validate-template --template-body file://template.yaml
+
   build:
     commands:
-      - echo "Deploying website"
-      - aws s3 sync website/ s3://my-auto-site-$AWS_ACCOUNT_ID
+      - echo "Deploying CloudFormation stack..."
+      - |
+        aws cloudformation deploy \
+          --template-file template.yaml \
+          --stack-name my-auto-site \
+          --capabilities CAPABILITY_NAMED_IAM \
+          --no-fail-on-empty-changeset
+      - echo "Syncing website files to S3..."
+      - aws s3 sync website/ s3://my-auto-site-$AWS_ACCOUNT_ID --delete
+
+  post_build:
+    commands:
+      - echo "Triggering CloudFront invalidation via Lambda..."
+      - |
+        LAMBDA_NAME="cf-invalidate-$AWS_ACCOUNT_ID"
+        aws lambda invoke \
+          --function-name "$LAMBDA_NAME" \
+          --invocation-type RequestResponse \
+          /tmp/lambda_response.json
+        cat /tmp/lambda_response.json
+      - echo "Fetching CloudFront distribution URL..."
+      - |
+        aws cloudformation describe-stacks \
+          --stack-name my-auto-site \
+          --query "Stacks[0].Outputs[?OutputKey=='CloudFrontURL'].OutputValue" \
+          --output text
+      - echo "Deployment complete."
