@@ -1,15 +1,32 @@
 AWSTemplateFormatVersion: '2010-09-09'
+
 Resources:
 
   MyBucket:
     Type: AWS::S3::Bucket
     Properties:
-      BucketName: my-auto-site-12345
+      BucketName: !Sub "my-auto-site-${AWS::AccountId}"
       PublicAccessBlockConfiguration:
         BlockPublicAcls: true
         BlockPublicPolicy: true
         IgnorePublicAcls: true
         RestrictPublicBuckets: true
+
+  BucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref MyBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: cloudfront.amazonaws.com
+            Action: s3:GetObject
+            Resource: !Sub "${MyBucket.Arn}/*"
+            Condition:
+              StringEquals:
+                AWS:SourceArn: !Sub "arn:aws:cloudfront::${AWS::AccountId}:distribution/${Distribution}"
 
   OAC:
     Type: AWS::CloudFront::OriginAccessControl
@@ -34,8 +51,12 @@ Resources:
         DefaultCacheBehavior:
           TargetOriginId: S3Origin
           ViewerProtocolPolicy: redirect-to-https
-          AllowedMethods: [GET, HEAD]
-          CachedMethods: [GET, HEAD]
+          AllowedMethods:
+            - GET
+            - HEAD
+          CachedMethods:
+            - GET
+            - HEAD
           ForwardedValues:
             QueryString: false
 
@@ -43,6 +64,7 @@ Resources:
     Type: AWS::IAM::Role
     Properties:
       AssumeRolePolicyDocument:
+        Version: "2012-10-17"
         Statement:
           - Effect: Allow
             Principal:
@@ -51,10 +73,17 @@ Resources:
       Policies:
         - PolicyName: InvalidatePolicy
           PolicyDocument:
+            Version: "2012-10-17"
             Statement:
               - Effect: Allow
                 Action:
                   - cloudfront:CreateInvalidation
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
                 Resource: "*"
 
   InvalidateLambda:
@@ -63,18 +92,32 @@ Resources:
       Runtime: python3.9
       Handler: index.lambda_handler
       Role: !GetAtt LambdaRole.Arn
+      Timeout: 60
+      Environment:
+        Variables:
+          DISTRIBUTION_ID: !Ref Distribution
       Code:
         ZipFile: |
-          import boto3, time
+          import boto3, time, os
+
           def lambda_handler(event, context):
               cf = boto3.client('cloudfront')
-              cf.create_invalidation(
-                  DistributionId="REPLACE_WITH_ID",
+
+              response = cf.create_invalidation(
+                  DistributionId=os.environ['DISTRIBUTION_ID'],
                   InvalidationBatch={
-                      'Paths': {'Quantity':1,'Items':['/*']},
+                      'Paths': {
+                          'Quantity': 1,
+                          'Items': ['/*']
+                      },
                       'CallerReference': str(time.time())
                   }
               )
+
+              return {
+                  'statusCode': 200,
+                  'body': 'Invalidation created successfully'
+              }
 
 Outputs:
   CloudFrontURL:
