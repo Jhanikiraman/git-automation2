@@ -283,7 +283,16 @@ Resources:
     Type: AWS::CodePipeline::Pipeline
     Properties:
       Name: my-auto-site-pipeline
+      PipelineType: V2
       RoleArn: !GetAtt PipelineRole.Arn
+      Triggers:
+        - ProviderType: CodeStarSourceConnection
+          GitConfiguration:
+            SourceActionName: GitHub_Source
+            Push:
+              - Branches:
+                  Includes:
+                    - !Ref GitHubBranch
       ArtifactStore:
         Type: S3
         Location: !Ref ArtifactBucket
