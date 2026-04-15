@@ -36,8 +36,12 @@ Resources:
         DefaultCacheBehavior:
           TargetOriginId: S3Origin
           ViewerProtocolPolicy: redirect-to-https
-          AllowedMethods: [GET, HEAD]
-          CachedMethods: [GET, HEAD]
+          AllowedMethods:
+            - GET
+            - HEAD
+          CachedMethods:
+            - GET
+            - HEAD
           ForwardedValues:
             QueryString: false
 
@@ -49,7 +53,8 @@ Resources:
       PolicyDocument:
         Version: "2012-10-17"
         Statement:
-          - Effect: Allow
+          - Sid: AllowCloudFrontAccess
+            Effect: Allow
             Principal:
               Service: cloudfront.amazonaws.com
             Action: s3:GetObject
@@ -61,6 +66,7 @@ Resources:
   LambdaRole:
     Type: AWS::IAM::Role
     Properties:
+      RoleName: !Sub "cf-invalidation-role-${AWS::AccountId}"
       AssumeRolePolicyDocument:
         Version: "2012-10-17"
         Statement:
@@ -87,6 +93,7 @@ Resources:
   InvalidateLambda:
     Type: AWS::Lambda::Function
     Properties:
+      FunctionName: !Sub "cf-invalidate-${AWS::AccountId}"
       Runtime: python3.9
       Handler: index.lambda_handler
       Role: !GetAtt LambdaRole.Arn
@@ -112,6 +119,8 @@ Resources:
                   }
               )
 
+              print(response)
+
               return {
                   'statusCode': 200,
                   'body': 'Invalidation created successfully'
@@ -119,4 +128,5 @@ Resources:
 
 Outputs:
   CloudFrontURL:
+    Description: "Website URL"
     Value: !Sub "https://${Distribution.DomainName}"
