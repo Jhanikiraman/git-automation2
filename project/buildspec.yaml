@@ -1,0 +1,7 @@
+version: 0.2
+
+phases:
+  build:
+    commands:
+      - echo "Deploying site..."
+      - aws s3 sync website/ s3://my-auto-site-12345
