@@ -1,5 +1,23 @@
 AWSTemplateFormatVersion: '2010-09-09'
 
+Parameters:
+  GitHubOwner:
+    Type: String
+    Description: "GitHub username or org (e.g. joybit)"
+  GitHubRepo:
+    Type: String
+    Description: "Repository name (e.g. my-site)"
+  GitHubBranch:
+    Type: String
+    Default: main
+    Description: "Branch to track"
+  GitHubConnectionArn:
+    Type: String
+    Default: "arn:aws:codeconnections:eu-west-3:649033859584:connection/69f0d2ac-444f-4c01-abd2-09368acc5f52"
+    Description: "CodeConnections ARN for GitHub"
+
+# ─── S3 ───────────────────────────────────────────────────────────────────────
+
 Resources:
 
   MyBucket:
@@ -11,6 +29,18 @@ Resources:
         BlockPublicPolicy: true
         IgnorePublicAcls: true
         RestrictPublicBuckets: true
+
+  ArtifactBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "my-auto-site-artifacts-${AWS::AccountId}"
+      LifecycleConfiguration:
+        Rules:
+          - Id: ExpireOldArtifacts
+            Status: Enabled
+            ExpirationInDays: 30
+
+# ─── CLOUDFRONT ───────────────────────────────────────────────────────────────
 
   OAC:
     Type: AWS::CloudFront::OriginAccessControl
@@ -36,12 +66,8 @@ Resources:
         DefaultCacheBehavior:
           TargetOriginId: S3Origin
           ViewerProtocolPolicy: redirect-to-https
-          AllowedMethods:
-            - GET
-            - HEAD
-          CachedMethods:
-            - GET
-            - HEAD
+          AllowedMethods: [GET, HEAD]
+          CachedMethods:  [GET, HEAD]
           ForwardedValues:
             QueryString: false
 
@@ -63,6 +89,8 @@ Resources:
               StringEquals:
                 AWS:SourceArn: !Sub "arn:aws:cloudfront::${AWS::AccountId}:distribution/${Distribution}"
 
+# ─── LAMBDA (INVALIDATION) ────────────────────────────────────────────────────
+
   LambdaRole:
     Type: AWS::IAM::Role
     Properties:
@@ -80,8 +108,7 @@ Resources:
             Version: "2012-10-17"
             Statement:
               - Effect: Allow
-                Action:
-                  - cloudfront:CreateInvalidation
+                Action: cloudfront:CreateInvalidation
                 Resource: !Sub "arn:aws:cloudfront::${AWS::AccountId}:distribution/${Distribution}"
               - Effect: Allow
                 Action:
@@ -107,26 +134,194 @@ Resources:
 
           def lambda_handler(event, context):
               cf = boto3.client('cloudfront')
-
               response = cf.create_invalidation(
                   DistributionId=os.environ['DISTRIBUTION_ID'],
                   InvalidationBatch={
-                      'Paths': {
-                          'Quantity': 1,
-                          'Items': ['/*']
-                      },
+                      'Paths': {'Quantity': 1, 'Items': ['/*']},
                       'CallerReference': str(time.time())
                   }
               )
-
               print(response)
+              return {'statusCode': 200, 'body': 'Invalidation created successfully'}
 
-              return {
-                  'statusCode': 200,
-                  'body': 'Invalidation created successfully'
-              }
+# ─── CODEBUILD ────────────────────────────────────────────────────────────────
+
+  CodeBuildRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "codebuild-site-role-${AWS::AccountId}"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codebuild.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: CodeBuildPermissions
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: "*"
+              - Effect: Allow
+                Action: [s3:GetObject, s3:PutObject, s3:GetObjectVersion]
+                Resource: !Sub "${ArtifactBucket.Arn}/*"
+              - Effect: Allow
+                Action: [s3:PutObject, s3:DeleteObject, s3:ListBucket]
+                Resource:
+                  - !GetAtt MyBucket.Arn
+                  - !Sub "${MyBucket.Arn}/*"
+              - Effect: Allow
+                Action:
+                  - cloudformation:CreateStack
+                  - cloudformation:UpdateStack
+                  - cloudformation:DescribeStacks
+                  - cloudformation:DescribeStackEvents
+                  - cloudformation:ValidateTemplate
+                  - cloudformation:GetTemplateSummary
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - iam:CreateRole
+                  - iam:UpdateRole
+                  - iam:DeleteRole
+                  - iam:PutRolePolicy
+                  - iam:DeleteRolePolicy
+                  - iam:GetRole
+                  - iam:PassRole
+                  - iam:AttachRolePolicy
+                  - iam:DetachRolePolicy
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - lambda:CreateFunction
+                  - lambda:UpdateFunctionCode
+                  - lambda:UpdateFunctionConfiguration
+                  - lambda:GetFunction
+                  - lambda:InvokeFunction
+                  - lambda:AddPermission
+                  - lambda:RemovePermission
+                  - lambda:TagResource
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - cloudfront:CreateDistribution
+                  - cloudfront:UpdateDistribution
+                  - cloudfront:GetDistribution
+                  - cloudfront:CreateOriginAccessControl
+                  - cloudfront:GetOriginAccessControl
+                  - cloudfront:CreateInvalidation
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - s3:CreateBucket
+                  - s3:PutBucketPolicy
+                  - s3:PutPublicAccessBlock
+                  - s3:GetBucketPolicy
+                Resource: "*"
+
+  CodeBuildProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Sub "my-auto-site-build-${AWS::AccountId}"
+      ServiceRole: !GetAtt CodeBuildRole.Arn
+      Artifacts:
+        Type: CODEPIPELINE
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/standard:7.0
+        EnvironmentVariables:
+          - Name: AWS_ACCOUNT_ID
+            Value: !Ref AWS::AccountId
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: buildspec.yml
+
+# ─── CODEPIPELINE ─────────────────────────────────────────────────────────────
+
+  PipelineRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "codepipeline-site-role-${AWS::AccountId}"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codepipeline.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: PipelinePermissions
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:GetObjectVersion
+                  - s3:GetBucketVersioning
+                Resource:
+                  - !GetAtt ArtifactBucket.Arn
+                  - !Sub "${ArtifactBucket.Arn}/*"
+              - Effect: Allow
+                Action:
+                  - codebuild:BatchGetBuilds
+                  - codebuild:StartBuild
+                Resource: !GetAtt CodeBuildProject.Arn
+              - Effect: Allow
+                Action: codestar-connections:UseConnection
+                Resource: !Ref GitHubConnectionArn
+
+  Pipeline:
+    Type: AWS::CodePipeline::Pipeline
+    Properties:
+      Name: my-auto-site-pipeline
+      RoleArn: !GetAtt PipelineRole.Arn
+      ArtifactStore:
+        Type: S3
+        Location: !Ref ArtifactBucket
+      Stages:
+        - Name: Source
+          Actions:
+            - Name: GitHub_Source
+              ActionTypeId:
+                Category: Source
+                Owner: AWS
+                Provider: CodeStarSourceConnection
+                Version: "1"
+              Configuration:
+                ConnectionArn: !Ref GitHubConnectionArn
+                FullRepositoryId: !Sub "${GitHubOwner}/${GitHubRepo}"
+                BranchName: !Ref GitHubBranch
+                OutputArtifactFormat: CODE_ZIP
+              OutputArtifacts:
+                - Name: SourceArtifact
+        - Name: Build
+          Actions:
+            - Name: Deploy
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: "1"
+              Configuration:
+                ProjectName: !Ref CodeBuildProject
+              InputArtifacts:
+                - Name: SourceArtifact
+
+# ─── OUTPUTS ──────────────────────────────────────────────────────────────────
 
 Outputs:
   CloudFrontURL:
     Description: "Website URL"
     Value: !Sub "https://${Distribution.DomainName}"
+  PipelineName:
+    Description: "CodePipeline name"
+    Value: !Ref Pipeline
